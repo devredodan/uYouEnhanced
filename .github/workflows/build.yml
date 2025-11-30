@@ -141,14 +141,26 @@ jobs:
         run: |
           # Fix lcpshim (libcolorpicker) module compatibility with iOS 26 SDK
           # The iOS 26 SDK has breaking changes in DarwinFoundation module maps
-          # Adding -fno-modules disables Clang modules and fixes the build
+          # We need to convert @import to #import since @import forces module building
+          
           cd ${{ github.workspace }}/main/Tweaks/Alderis/lcpshim
+          
+          # Convert @import Alderis; to #import <Alderis/Alderis.h>
+          for file in *.m; do
+            if [ -f "$file" ]; then
+              sed -i '' 's/@import Alderis;/#import <Alderis\/Alderis.h>/' "$file"
+              echo "==> Patched $file"
+            fi
+          done
+          
+          # Add -fno-modules to CFLAGS as backup
           if grep -q "libcolorpicker_CFLAGS" Makefile; then
             sed -i '' 's/libcolorpicker_CFLAGS = /libcolorpicker_CFLAGS = -fno-modules /' Makefile
           else
             echo "libcolorpicker_CFLAGS = -fno-modules" >> Makefile
           fi
-          echo "==> Applied -fno-modules fix to lcpshim"
+          
+          echo "==> Applied iOS 26 SDK compatibility fixes to lcpshim"
 
       - name: Fix compiling & Build Package
         id: build_package
