@@ -196,12 +196,15 @@ jobs:
           echo "==> Step 2: Patching lcpshim source..."
           cd ${{ github.workspace }}/main/Tweaks/Alderis/lcpshim
           
+          # Use nullglob to handle case where no files match (fixes syntax error)
+          shopt -s nullglob
           patched_count=0
-          for file in *.m *.h 2>/dev/null; do
+          for file in *.m *.h; do
             if patch_file "$file"; then
               ((patched_count++)) || true
             fi
           done
+          shopt -u nullglob
           echo "    Patched $patched_count files in lcpshim"
           
           # Add -fno-modules compiler flag
@@ -226,6 +229,7 @@ jobs:
           
           if [ -d "$FRAMEWORK_PATH" ]; then
             echo "==> Post-build: Patching installed Alderis framework headers..."
+            shopt -s nullglob
             for header in "$FRAMEWORK_PATH"/*.h; do
               if [ -f "$header" ] && grep -q "@import" "$header" 2>/dev/null; then
                 sed -i '' \
@@ -240,6 +244,7 @@ jobs:
                 echo "    ✓ Post-build patched: $(basename $header)"
               fi
             done
+            shopt -u nullglob
           fi
           ENDSCRIPT
           chmod +x ${{ github.workspace }}/patch_framework_headers.sh
@@ -295,7 +300,8 @@ jobs:
             while true; do
               FRAMEWORK_HEADERS="${THEOS}/vendor/lib/iphone/rootless/Alderis.framework/Headers"
               if [ -d "$FRAMEWORK_HEADERS" ]; then
-                for header in "$FRAMEWORK_HEADERS"/*.h 2>/dev/null; do
+                shopt -s nullglob
+                for header in "$FRAMEWORK_HEADERS"/*.h; do
                   if [ -f "$header" ] && grep -q "@import" "$header" 2>/dev/null; then
                     sed -i '' \
                       -e 's/@import UIKit;/#import <UIKit\/UIKit.h>/g' \
@@ -309,6 +315,7 @@ jobs:
                     echo "==> [Monitor] Patched: $(basename $header)"
                   fi
                 done
+                shopt -u nullglob
               fi
               sleep 2
             done
