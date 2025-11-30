@@ -139,28 +139,147 @@ jobs:
 
       - name: Fix iOS 26 SDK module compatibility
         run: |
-          # Fix lcpshim (libcolorpicker) module compatibility with iOS 26 SDK
+          # ============================================================
+          # iOS 26 SDK Module Compatibility Fix
+          # ============================================================
           # The iOS 26 SDK has breaking changes in DarwinFoundation module maps
-          # We need to convert @import to #import since @import forces module building
+          # that cause "@import" statements to fail.
+          #
+          # Solution: Convert all @import statements to traditional #import
+          # ============================================================
           
+          echo "============================================================"
+          echo "iOS 26 SDK Module Compatibility Fix"
+          echo "============================================================"
+          
+          # Function to patch @import statements in a file
+          patch_file() {
+            local file="$1"
+            if [ -f "$file" ]; then
+              if grep -q "@import" "$file" 2>/dev/null; then
+                sed -i '' \
+                  -e 's/@import UIKit;/#import <UIKit\/UIKit.h>/g' \
+                  -e 's/@import Foundation;/#import <Foundation\/Foundation.h>/g' \
+                  -e 's/@import CoreGraphics;/#import <CoreGraphics\/CoreGraphics.h>/g' \
+                  -e 's/@import QuartzCore;/#import <QuartzCore\/QuartzCore.h>/g' \
+                  -e 's/@import CoreFoundation;/#import <CoreFoundation\/CoreFoundation.h>/g' \
+                  -e 's/@import ObjectiveC;/#import <objc\/runtime.h>/g' \
+                  -e 's/@import Security;/#import <Security\/Security.h>/g' \
+                  -e 's/@import Alderis;/#import <Alderis\/Alderis.h>/g' \
+                  "$file"
+                echo "    ✓ Patched: $file"
+                return 0
+              fi
+            fi
+            return 1
+          }
+          
+          # ============================================================
+          # Step 1: Patch Alderis framework source files
+          # ============================================================
+          echo ""
+          echo "==> Step 1: Patching Alderis framework source..."
+          cd ${{ github.workspace }}/main/Tweaks/Alderis
+          
+          patched_count=0
+          while IFS= read -r -d '' file; do
+            if patch_file "$file"; then
+              ((patched_count++)) || true
+            fi
+          done < <(find . -type f \( -name "*.h" -o -name "*.m" \) -print0)
+          echo "    Patched $patched_count files in Alderis"
+          
+          # ============================================================
+          # Step 2: Patch lcpshim source files
+          # ============================================================
+          echo ""
+          echo "==> Step 2: Patching lcpshim source..."
           cd ${{ github.workspace }}/main/Tweaks/Alderis/lcpshim
           
-          # Convert @import Alderis; to #import <Alderis/Alderis.h>
-          for file in *.m; do
-            if [ -f "$file" ]; then
-              sed -i '' 's/@import Alderis;/#import <Alderis\/Alderis.h>/' "$file"
-              echo "==> Patched $file"
+          patched_count=0
+          for file in *.m *.h 2>/dev/null; do
+            if patch_file "$file"; then
+              ((patched_count++)) || true
             fi
           done
+          echo "    Patched $patched_count files in lcpshim"
           
-          # Add -fno-modules to CFLAGS as backup
-          if grep -q "libcolorpicker_CFLAGS" Makefile; then
-            sed -i '' 's/libcolorpicker_CFLAGS = /libcolorpicker_CFLAGS = -fno-modules /' Makefile
-          else
-            echo "libcolorpicker_CFLAGS = -fno-modules" >> Makefile
+          # Add -fno-modules compiler flag
+          if [ -f Makefile ]; then
+            if ! grep -q "libcolorpicker_CFLAGS.*-fno-modules" Makefile; then
+              echo "libcolorpicker_CFLAGS = -fno-modules -Wno-error" >> Makefile
+              echo "    ✓ Added -fno-modules to lcpshim Makefile"
+            fi
           fi
           
-          echo "==> Applied iOS 26 SDK compatibility fixes to lcpshim"
+          # ============================================================
+          # Step 3: Create post-install hook script
+          # ============================================================
+          echo ""
+          echo "==> Step 3: Setting up post-build framework patching..."
+          
+          # Create the patch script
+          cat > ${{ github.workspace }}/patch_framework_headers.sh << 'ENDSCRIPT'
+          #!/bin/bash
+          # Patch installed Alderis framework headers after build
+          FRAMEWORK_PATH="${THEOS}/vendor/lib/iphone/rootless/Alderis.framework/Headers"
+          
+          if [ -d "$FRAMEWORK_PATH" ]; then
+            echo "==> Post-build: Patching installed Alderis framework headers..."
+            for header in "$FRAMEWORK_PATH"/*.h; do
+              if [ -f "$header" ] && grep -q "@import" "$header" 2>/dev/null; then
+                sed -i '' \
+                  -e 's/@import UIKit;/#import <UIKit\/UIKit.h>/g' \
+                  -e 's/@import Foundation;/#import <Foundation\/Foundation.h>/g' \
+                  -e 's/@import CoreGraphics;/#import <CoreGraphics\/CoreGraphics.h>/g' \
+                  -e 's/@import QuartzCore;/#import <QuartzCore\/QuartzCore.h>/g' \
+                  -e 's/@import CoreFoundation;/#import <CoreFoundation\/CoreFoundation.h>/g' \
+                  -e 's/@import ObjectiveC;/#import <objc\/runtime.h>/g' \
+                  -e 's/@import Security;/#import <Security\/Security.h>/g' \
+                  "$header"
+                echo "    ✓ Post-build patched: $(basename $header)"
+              fi
+            done
+          fi
+          ENDSCRIPT
+          chmod +x ${{ github.workspace }}/patch_framework_headers.sh
+          
+          # ============================================================
+          # Step 4: Modify Alderis Makefile to run patch after build
+          # ============================================================
+          cd ${{ github.workspace }}/main/Tweaks/Alderis
+          
+          if [ -f Makefile ]; then
+            if ! grep -q "patch_framework_headers" Makefile; then
+              # Add post-build hook with proper TAB indentation (Makefile requires TAB)
+              printf '\n# iOS 26 SDK compatibility - patch installed headers after Alderis builds\n' >> Makefile
+              printf 'internal-xcodeproj-all::\n' >> Makefile
+              printf '\t@%s/patch_framework_headers.sh\n' "${{ github.workspace }}" >> Makefile
+              echo "    ✓ Added post-build hook to Alderis Makefile"
+            fi
+          fi
+          
+          # ============================================================
+          # Verification
+          # ============================================================
+          echo ""
+          echo "==> Verification: Checking for remaining @import statements..."
+          cd ${{ github.workspace }}/main/Tweaks/Alderis
+          
+          remaining=$(grep -r "@import" --include="*.h" --include="*.m" . 2>/dev/null | grep -v "^Binary" | head -10 || true)
+          if [ -n "$remaining" ]; then
+            echo "    Note: Some @import found (will be handled by post-build hook if in framework):"
+            echo "$remaining" | head -5
+          else
+            echo "    ✓ No @import statements found in source files"
+          fi
+          
+          echo ""
+          echo "============================================================"
+          echo "iOS 26 SDK compatibility patches applied successfully!"
+          echo "============================================================"
+        env:
+          THEOS: ${{ github.workspace }}/theos
 
       - name: Fix compiling & Build Package
         id: build_package
@@ -169,7 +288,46 @@ jobs:
           sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile                          # Modify the bundle ID
           sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile                        # Modify the app name
           sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile # Modify the SDK version
+          
+          # Build with a background process that monitors and patches the framework
+          # This is a failsafe in case the Makefile hook doesn't trigger
+          (
+            while true; do
+              FRAMEWORK_HEADERS="${THEOS}/vendor/lib/iphone/rootless/Alderis.framework/Headers"
+              if [ -d "$FRAMEWORK_HEADERS" ]; then
+                for header in "$FRAMEWORK_HEADERS"/*.h 2>/dev/null; do
+                  if [ -f "$header" ] && grep -q "@import" "$header" 2>/dev/null; then
+                    sed -i '' \
+                      -e 's/@import UIKit;/#import <UIKit\/UIKit.h>/g' \
+                      -e 's/@import Foundation;/#import <Foundation\/Foundation.h>/g' \
+                      -e 's/@import CoreGraphics;/#import <CoreGraphics\/CoreGraphics.h>/g' \
+                      -e 's/@import QuartzCore;/#import <QuartzCore\/QuartzCore.h>/g' \
+                      -e 's/@import CoreFoundation;/#import <CoreFoundation\/CoreFoundation.h>/g' \
+                      -e 's/@import ObjectiveC;/#import <objc\/runtime.h>/g' \
+                      -e 's/@import Security;/#import <Security\/Security.h>/g' \
+                      "$header" 2>/dev/null
+                    echo "==> [Monitor] Patched: $(basename $header)"
+                  fi
+                done
+              fi
+              sleep 2
+            done
+          ) &
+          MONITOR_PID=$!
+          
+          # Run the actual build
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
+          BUILD_RESULT=$?
+          
+          # Stop the monitor
+          kill $MONITOR_PID 2>/dev/null || true
+          
+          # Check build result
+          if [ $BUILD_RESULT -ne 0 ]; then
+            echo "Build failed with exit code $BUILD_RESULT"
+            exit $BUILD_RESULT
+          fi
+          
           echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
           echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
